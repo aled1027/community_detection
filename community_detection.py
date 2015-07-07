@@ -11,10 +11,6 @@ import numpy as np
 # and modularity() takes a long time
 # paper has some points on computing delta modularity more quickly
 
-c1 = []
-c2 = []
-modularity_dict = {}
-
 def get_adj_dict(which_set):
     """
     returns a symmettric adjacency dictionary
@@ -40,6 +36,16 @@ def get_adj_dict(which_set):
                9:  [7,8],
                10: [1,4,7],
                }
+        return adj_dict
+    elif which_set == 'tester':
+        adj_dict = {
+                1: [2,3,4],
+                2: [1,3],
+                3: [1,2],
+                4: [1,5,6],
+                5: [4,6],
+                6: [4,5]
+                }
         return adj_dict
     else:
         raise RuntimeError('%s is not a set we have' % which_set)
@@ -83,6 +89,13 @@ def get_initial_S(which_set, num_nodes):
                 S[i] = b
             else:
                 S[i] = c
+    elif which_set == 'tester':
+        S = np.zeros((6,2))
+        S[1,0] = 1
+        S[2,0] = 1
+        S[3,1] = 1
+        S[4,1] = 1
+        S[5,1] = 1
     else:
         raise RuntimeError('no such condition %s' % which_set)
     return S
@@ -106,20 +119,13 @@ def get_B(A):
             B[i,j] = B[j,i] = A[i,j] - float((edge_deg(i) * edge_deg(j)) / (num_stubs))
     return B
 
-def modularity(A, S, B):
+def modularity(A, S):
     """
     computes modularity, Q, where Q = 1/2m * Tr(S^t B S)
     """
-    string = str(A) + str(S) + str(B)
-    if string in modularity_dict:
-        c1.append(1)
-        return modularity_dict[string]
-    else:
-        c2.append(1)
-        num_stubs = get_num_stubs(A)
-        val =  float(1 / num_stubs) * np.trace(np.dot(np.transpose(S), np.dot(B,S)))
-        modularity_dict[string] = val
-        return val
+    B = get_B(A)
+    num_stubs = get_num_stubs(A)
+    return float(1 / num_stubs) * np.trace(np.dot(np.transpose(S), np.dot(B,S)))
 
 def get_num_stubs(A):
     """
@@ -129,10 +135,6 @@ def get_num_stubs(A):
     """
     return np.sum(A)
 
-def delta_modularity():
-    pass
-
-
 def phase1(A, S):
     """
     phase1 takes the graph A and S and returns a better S
@@ -140,40 +142,35 @@ def phase1(A, S):
 
     S[i,c] = 1 if node i belongs to community c else 0
     """
-    num_stubs = get_num_stubs(A)
-    B = get_B(A)
 
     # loop over nodes, finding a local max of Q
+    num_stubs = A.shape[0]
     counter = 0
     wasChangedInFunction = False
     wasChangedInLoop = True
     while wasChangedInLoop:
         wasChangedInLoop = False
-        # print('phase1 counter: %d' % counter)
+        print('phase1_counter: %d' % counter)
         counter+=1
-
         # loop over each node
         # this for loop takes fooooorever
         for i, S_row in enumerate(S):
-            print('phase1 node number %d' % i)
             cur_community = best_community = np.nonzero(S_row)[0][0]
-            best_modularity = modularity(A, S, B)
 
             # remove node from its former community
             S_row[cur_community] = 0
-            # try all other communities
-            for j, _ in enumerate(S_row):
-                S[i,j] = 1
-                changed_modularity = modularity(A, S, B)
-                if changed_modularity > best_modularity:
-                    best_community = j
-                    best_modularity = changed_modularity
 
-                S[i,j] = 0
+            # find best delta Q for all other communities
+            best_delta_Q = -10.0
+            for j, _ in enumerate(S_row):
+                delta_Q = delta_modularity(i, j, num_stubs, A, S)
+                if delta_Q > best_delta_Q:
+                    best_delta_Q = delta_Q
+                    best_community = j
             if cur_community != best_community:
                 wasChangedInLoop= True
                 wasChangedInFunction= True
-            S_row[best_community] = 1
+            S[i, best_community] = 1
 
     # remove columns that all zeros via a mask
     # this removes irrelevant communities
@@ -185,6 +182,7 @@ def phase2(A, S, node_comm_associations):
     """
     squash communities
     """
+    print('starting phase2')
     # So S = num_nodes by num_communities
     # so we are going to have
     num_communities = S.shape[1]
@@ -222,79 +220,70 @@ def phase2(A, S, node_comm_associations):
         new_S[i,i] = 1
     return new_A, new_S, new_node_comm_associations
 
+
+def delta_modularity(node_i, community, num_stubs, A, S):
+    # formula:
+    # sum over all nodes j in community
+    # (1/num_stubs) * (2 * (A_ij - (k_i * k_j) / num_stubs) + (A_ii - (k_i*k_i)/num_stubs))
+    #
+    # seems to be off in the third decimal point
+    # not sure why
+    #
+    # returns the value of adding node_i to community
+    # simply multiply the value by negative 1 to get the value
+    # of removing node i from the community
+
+    k_dict = {}
+    def k(node_idx):
+        if node_idx in k_dict:
+            return k_dict[node_idx]
+        else:
+            val =  np.sum(A[node_idx])
+            k_dict[node_idx] = val
+            return val
+
+    cum_sum = 0
+    for j in np.nonzero(S[:,community])[0]:
+        cum_sum += (A[node_i,j] - ((k(node_i) * k(j)) / num_stubs))
+    cum_sum = 2 * cum_sum
+    cum_sum += A[node_i, node_i] - ((k(node_i)**2) / num_stubs)
+    cum_sum = cum_sum / num_stubs
+    return cum_sum
+
 def go(A,S):
     counter = 0
-    node_comm_associations = [[i] for i in range(10)]
-
+    node_comm_associations = [[i] for i in range(A.shape[0])]
     while True:
         print ('iteration %d' % counter)
         counter+=1
         S, wasChanged = phase1(A,S)
-
         if wasChanged == False:
             break
-
         A, S, node_comm_associations = phase2(A, S, node_comm_associations)
-
+        break
     return A, S, node_comm_associations
-
-    # new_A = phase2(A,S)
-    # return A,S
-
-
-def time_tests():
-    def time_function(f, arg1=None, arg2=None, arg3=None):
-        import time
-        start = time.time()
-        if arg1 == None:
-            ret = f()
-        elif arg2 == None:
-            ret = f(arg1)
-        elif arg3 == None:
-            ret = f(arg1, arg2)
-        else:
-            ret = f(arg1, arg2, arg3)
-        elapsed = time.time() - start
-        return ret, elapsed
-
-    print('running time tests')
-
-    # SETUP
-    adj_dict_which_set = 'patents'
-    # adj_dict_which_set = 'wikipedia'
-    adj_dict = get_adj_dict(adj_dict_which_set)
-
-    # time get_adjacency_matrix
-    A, time_elapsed = time_function(get_adjaceny_matrix, adj_dict)
-    print ('get_adjaceny_matrix: %f' % time_elapsed)
-
-    num_nodes = A.shape[0]
-    S = get_initial_S('generic', num_nodes)
-
-    # time get_B
-    B, time_elapsed = time_function(get_B, A)
-    print ('get_B: %f' % time_elapsed)
-
-    #time modularity
-    Q, time_elapsed = time_function(modularity, A, S, B)
-    print ('modularity: %f' % time_elapsed)
 
 if __name__ == '__main__':
     print('main')
-    adj_dict = get_adj_dict('patents')
+    adj_dict = get_adj_dict('wikipedia')
     A = get_adjaceny_matrix(adj_dict)
     num_nodes = A.shape[0]
     S = get_initial_S('generic', num_nodes)
-    B = get_B(A)
+    # s,b = phase1(A,S)
+    a,s,n = go(A,S)
+
+    # f = delta_modularity(0,0,A,S)
+    # g = modularity(A, S, B)
+
 
     # x,y = phase1(A, S)
     # print(x)
     # print(y)
 
-    X,Y,Z = go(A,S)
-    print(X)
-    print(Y)
-    print(Z)
+    #X,Y,Z = go(A,S)
+    #print(X)
+    #print(Y)
+    #print(Z)
 
 
 
